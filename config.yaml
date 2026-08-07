@@ -1,0 +1,86 @@
+database:
+  db_name: "chat_meta.db"
+  history_db_path: "sqlite:///memory_pure.sqlite"
+
+llm:
+  type: "ChatOpenAI"
+  model_name: "glm-4-flash"
+  zai_api_base: "https://open.bigmodel.cn/api/paas/v4/"
+
+embedding:
+  type: "HuggingFaceEmbeddings"
+  model_name: "all-MiniLM-L6-v2"
+
+retriever:
+  type: "HybridRRFRetriever"
+  vector_search_k: 6
+  vector_fetch_k: 24
+  vector_mmr_lambda: 0.4
+  bm25_k: 8
+  rrf_k: 60
+  rerank_model_name: "BAAI/bge-reranker-v2-m3"
+  rerank_candidates: 8
+  rerank_top_k: 4
+  rerank_min_score: -100.0
+  rerank_skip_enabled: true
+  rerank_skip_short_query_tokens: 3
+  rerank_skip_rrf_abs_margin: 0.003
+  rerank_skip_rrf_ratio: 1.25
+  chunk_size: 600
+  chunk_overlap: 120
+  enable_hyde: true
+  hyde_max_query_length: 200
+  hyde_max_output_chars: 180
+
+loader:
+  type: "UnstructuredFileLoader"
+  pdf_type: "PyPDFLoader"
+  txt_type: "TextLoader"
+
+data:
+  dir: "./data"
+  max_upload_mb: 20
+  max_chunks_per_file: 1000
+  async_upload_threshold_mb: 5
+  max_session_storage_mb: 200
+  max_workspace_import_mb: 100
+  max_workspace_output_files: 100
+  max_workspace_output_mb: 50
+  max_artifact_mb: 20
+  # off: development default; clamav_required: reject if ClamAV cannot scan.
+  upload_scan_mode: "off"
+  clamav_command: "clamscan"
+
+logging:
+  log_file: "chatbot.log"
+
+agent:
+  enable_code_execution: true
+  max_iterations: 8
+  max_execution_time_seconds: 60
+  code_timeout_seconds: 5
+  code_output_limit: 8000
+  code_max_chars: 12000
+
+# Workspace mode is opt-in. Chat mode keeps the existing behavior and tool set.
+sandbox:
+  enabled: true
+  provider: "opensandbox"
+  domain: "127.0.0.1:8080"
+  protocol: "http"
+  api_key_env: "OPEN_SANDBOX_API_KEY"
+  # Build this fixed Python 3.11 image from sandbox/Dockerfile.workspace.
+  image: "chatbot-workspace:py311-pandas-duckdb"
+  # Remote TTL and local idle recycle are deliberately separate.
+  sandbox_timeout_seconds: 1200
+  sandbox_idle_timeout_seconds: 600
+  sandbox_reaper_interval_seconds: 60
+  request_timeout_seconds: 30
+  command_timeout_seconds: 120
+  max_command_chars: 16000
+  max_output_chars: 50000
+  cpu: "1"
+  memory: "2Gi"
+  network_enabled: false
+  allowed_egress: []
+  use_server_proxy: true

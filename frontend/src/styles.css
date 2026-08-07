@@ -1,0 +1,268 @@
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: #f4f6f8;
+}
+
+.app-shell {
+  min-width: 1120px;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.session-sider {
+  border-right: 1px solid #dde3ea;
+  padding: 18px 14px;
+  overflow: hidden;
+}
+
+.brand {
+  margin-bottom: 18px;
+}
+
+.brand h4,
+.topbar h4 {
+  margin: 0;
+}
+
+.session-list {
+  margin-top: 16px;
+  height: calc(100vh - 132px);
+  overflow: auto;
+}
+
+.session-item {
+  border-radius: 6px;
+  padding: 10px 8px !important;
+  cursor: pointer;
+}
+
+.session-item:hover {
+  background: #f1f5f9;
+}
+
+.session-item.active {
+  background: #e8f1ff;
+}
+
+.topbar {
+  height: 64px;
+  padding: 10px 20px;
+  background: #ffffff;
+  border-bottom: 1px solid #dde3ea;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.topbar-title {
+  min-width: 0;
+}
+
+.topbar-title h4 {
+  max-width: calc(100vw - 720px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(560px, 1fr) 440px;
+  gap: 0;
+  height: calc(100vh - 64px);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.chat-panel {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  min-width: 0;
+  min-height: 0;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.message-list {
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 22px 28px;
+  scroll-behavior: smooth;
+}
+
+.message-row {
+  display: flex;
+  margin-bottom: 14px;
+}
+
+.message-row.user {
+  justify-content: flex-end;
+}
+
+.message-bubble {
+  max-width: min(780px, 82%);
+  border: 1px solid #dce2e8;
+  border-radius: 6px;
+  padding: 12px 14px;
+  background: #fbfcfd;
+}
+
+.message-row.user .message-bubble {
+  background: #eef6ff;
+  border-color: #bfdbfe;
+}
+
+.message-content {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.citation-link {
+  height: auto;
+  padding: 0 3px;
+  font-weight: 600;
+  vertical-align: baseline;
+}
+
+.citation-list {
+  margin-top: 8px;
+}
+
+.citation-drawer {
+  width: 100%;
+}
+
+.citation-content {
+  max-height: calc(100vh - 300px);
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 8px 0 0;
+  padding: 12px;
+  border: 1px solid #dce2e8;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #253041;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.message-status {
+  display: flex;
+  margin-top: 6px;
+}
+
+.composer {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  padding: 14px 18px;
+  border-top: 1px solid #dde3ea;
+  background: #ffffff;
+}
+
+.composer-mode {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.workspace-console {
+  margin: 0 18px 12px;
+  padding: 10px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+.workspace-console .ant-typography {
+  color: #e2e8f0;
+}
+
+.workspace-console pre {
+  max-height: 220px;
+  overflow: auto;
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+}
+
+.right-panel {
+  border-left: 1px solid #dde3ea;
+  background: #f8fafc;
+  overflow: auto;
+  padding: 16px;
+}
+
+.side-section {
+  margin-bottom: 18px;
+}
+
+.section-title {
+  width: 100%;
+  margin-bottom: 10px;
+  justify-content: space-between;
+}
+
+.compact-table {
+  margin-top: 10px;
+}
+
+.trace-label {
+  width: 100%;
+}
+
+.trace-body {
+  width: 100%;
+}
+
+.trace-text {
+  margin-top: 6px;
+  margin-bottom: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.json-block {
+  max-height: 220px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 10px;
+  border: 1px solid #dce2e8;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #253041;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.center-state {
+  height: 100%;
+  min-height: 260px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@media (max-width: 1180px) {
+  .app-shell {
+    min-width: 960px;
+  }
+
+  .workspace {
+    grid-template-columns: minmax(520px, 1fr) 380px;
+  }
+}

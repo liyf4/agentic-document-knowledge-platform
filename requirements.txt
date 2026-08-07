@@ -1,0 +1,38 @@
+streamlit
+fastapi
+uvicorn
+python-multipart
+aiosqlite
+langchain-core
+langchain-openai
+langchain-community
+langchain-text-splitters
+langchain-google-community
+langchain-huggingface
+langchain-chroma
+langchain-classic
+huggingface-hub
+pypdf
+google-api-python-client
+google-search-results
+sentence-transformers
+unstructured[md,docx,pdf]
+markdown
+python-magic-bin; platform_system == 'Windows'
+python-magic; platform_system != 'Windows'
+pdf2image
+pytesseract
+python-docx
+pandas
+pyarrow
+duckdb
+openpyxl
+pypandoc
+PyYAML
+chromadb
+rank_bm25
+python-dotenv
+loguru
+PySocks
+# Optional runtime used only when sandbox.enabled=true.
+opensandbox>=0.1.14,<0.2
