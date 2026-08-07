@@ -15,7 +15,7 @@
 ## 技术栈
 
 - 后端：Python、FastAPI、LangChain、ChromaDB、SQLite
-- 检索：Hugging Face Embeddings、BM25、RRF、CrossEncoder（可选）
+- 检索：Hugging Face Embeddings、BM25、RRF、CrossEncoder
 - 前端：React、TypeScript、Vite、Ant Design
 - 数据处理：pandas、PyArrow、DuckDB、PyPDF、python-docx、openpyxl
 
@@ -48,14 +48,6 @@ source .venv/bin/activate
 
 ### 2. 配置环境变量
 
-复制示例文件：
-
-```powershell
-Copy-Item .env.example .env
-```
-
-然后在 `.env` 中填写所需配置：
-
 ```dotenv
 ZAI_API_KEY=your_api_key
 GOOGLE_API_KEY=
@@ -64,8 +56,6 @@ SERPAPI_API_KEY=
 PROXY_PORT=
 OPEN_SANDBOX_API_KEY=
 ```
-
-至少配置当前模型提供商所需的 API Key。`.env` 已被 Git 忽略，请勿把真实密钥写入 `.env.example`、`config.yaml` 或源码。
 
 ### 3. 安装前端依赖
 
@@ -77,17 +67,6 @@ cd ..
 
 ### 4. 启动项目
 
-Windows 可以直接运行：
-
-```powershell
-.\start.cmd
-```
-
-也可以跨平台启动：
-
-```powershell
-python scripts/dev.py
-```
 
 默认地址：
 
@@ -127,18 +106,6 @@ utils/             网络与兼容性工具
 config.yaml        非敏感运行配置
 ```
 
-## 数据与隐私
-
-本项目会在本地生成会话、上传文件、向量索引、数据库、日志和执行结果。这些内容以及 `.env`、测试目录、评估结果、依赖目录和普通项目文档均已加入 `.gitignore`。
-
-提交前建议始终检查：
-
-```powershell
-git status --short
-git diff --cached
-```
-
-如果密钥曾经进入 Git 提交，仅删除本地文件或加入 `.gitignore` 并不能清除历史；应立即轮换密钥，并使用 `git filter-repo` 等工具清理仓库历史。
 
 ## 前端构建
 
@@ -146,5 +113,3 @@ git diff --cached
 cd frontend
 npm run build
 ```
-
-构建产物位于 `frontend/dist/`，不会提交到仓库。
