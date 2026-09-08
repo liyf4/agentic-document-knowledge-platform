@@ -1,8 +1,9 @@
 import os
 import re
 import time
-import streamlit as st
 from copy import deepcopy
+from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Dict, List, Tuple, Optional
 from langchain_chroma import Chroma
 from langchain_community.retrievers import BM25Retriever
@@ -24,18 +25,45 @@ from config import (
     RERANK_SKIP_SHORT_QUERY_TOKENS,
     RERANK_TOP_K,
     RRF_K,
+    PRIMARY_RETRIEVAL_WEIGHT,
+    SECONDARY_RETRIEVAL_WEIGHT,
     VECTOR_FETCH_K,
     VECTOR_MMR_LAMBDA,
     VECTOR_SEARCH_K,
 )
 from db.session_manager import get_session_documents, get_session_summary
+from db.file_manager import list_document_metadata
 from core.factory import ComponentFactory
 
 _LAST_RETRIEVAL_DEBUG: Dict[str, Dict[str, Any]] = {}
 _RETRIEVER_CACHE: Dict[str, Dict[str, Any]] = {}
 _CACHE_STATS: Dict[str, int] = {"hits": 0, "misses": 0, "invalidations": 0}
 
-@st.cache_resource
+
+@dataclass(frozen=True)
+class RetrievalPlan:
+    scope: str = "primary"
+    fact_types: Tuple[str, ...] = ()
+    file_ids: Tuple[str, ...] = ()
+    verify_facts_with_source: bool = False
+
+
+def plan_retrieval(query: str) -> RetrievalPlan:
+    lowered = query.casefold()
+    structure_terms = ("封面", "目录", "页眉", "页脚", "文档编号", "版本", "版权", "cover", "contents", "header", "footer")
+    fact_terms = ("金额", "页数", "日期", "合同号", "发票号", "项目号", "币种", "电话", "邮箱", "amount", "page count")
+    return RetrievalPlan(
+        scope="all" if any(term in lowered for term in structure_terms) else "primary",
+        verify_facts_with_source=any(term in lowered for term in fact_terms),
+    )
+
+
+def _in_scope(doc: Document, scope: str) -> bool:
+    if scope == "all":
+        return True
+    return str((doc.metadata or {}).get("retrieval_tier", "primary")) != "secondary"
+
+@lru_cache(maxsize=1)
 def get_embedding_model():
     """
     Load embedding model using ComponentFactory.
@@ -46,7 +74,7 @@ def get_embedding_model():
         model_name=EMBEDDING_MODEL_NAME
     )
 
-@st.cache_resource
+@lru_cache(maxsize=1)
 def get_rerank_model():
     """
     Load rerank model (CrossEncoder).
@@ -69,6 +97,8 @@ def _doc_debug(doc: Document, rank: int, score: Optional[float] = None) -> Dict[
         "score": score,
         "source": metadata.get("source", "未知来源"),
         "page": metadata.get("page"),
+        "printed_page": metadata.get("printed_page"),
+        "section_path": metadata.get("section_path"),
         "chunk_id": metadata.get("chunk_id", metadata.get("id")),
         "content": doc.page_content,
         "preview": doc.page_content[:240].replace("\n", " "),
@@ -141,6 +171,8 @@ def get_session_document_overview(
         grouped: Dict[str, List[Tuple[int, str, Dict[str, Any]]]] = {}
         for text, metadata in zip(all_texts, all_metadatas):
             safe_metadata = dict(metadata or {})
+            if str(safe_metadata.get("retrieval_tier", "primary")) == "secondary":
+                continue
             file_id = str(safe_metadata.get("file_id", ""))
             if not file_id:
                 continue
@@ -152,6 +184,7 @@ def get_session_document_overview(
 
         blocks = []
         final_docs = []
+        structured_metadata = {item["file_id"]: item.get("metadata", {}) for item in list_document_metadata(session_id)}
         rank = 1
         for file_id, file_name, chunk_count, status, _uploaded_at, _file_path in rows:
             chunks = sorted(grouped.get(file_id, []), key=lambda item: item[0])
@@ -161,8 +194,10 @@ def get_session_document_overview(
             if len(selected_text) > max_chars_per_file:
                 selected_text = f"{selected_text[:max_chars_per_file]}\n... <truncated>"
             metadata = chunks[0][2] if chunks else {}
+            metadata_summary = structured_metadata.get(file_id, {})
             blocks.append(
-                f"[{rank}] source={file_name}, file_id={file_id}, status={status}, chunks={chunk_count}\n"
+                f"[{rank}] source={file_name}, file_id={file_id}, status={status}, chunks={chunk_count}, "
+                f"metadata={metadata_summary}\n"
                 f"{selected_text}"
             )
             final_docs.append(
@@ -315,16 +350,33 @@ class HybridRRFRetriever:
             "error": "",
         }
         try:
+            plan = plan_retrieval(query)
+            debug["retrieval_plan"] = {
+                "scope": plan.scope, "fact_types": list(plan.fact_types),
+                "file_ids": list(plan.file_ids), "verify_facts_with_source": plan.verify_facts_with_source,
+            }
             dense_start = time.perf_counter()
-            dense_docs = self.vector_retriever.invoke(query)
+            dense_docs = [doc for doc in self.vector_retriever.invoke(query) if _in_scope(doc, plan.scope)]
             debug["timing_ms"]["dense"] = round((time.perf_counter() - dense_start) * 1000, 2)
 
             sparse_start = time.perf_counter()
-            sparse_docs = self.bm25_retriever.invoke(query)
+            sparse_docs = [doc for doc in self.bm25_retriever.invoke(query) if _in_scope(doc, plan.scope)]
             debug["timing_ms"]["bm25"] = round((time.perf_counter() - sparse_start) * 1000, 2)
 
             rrf_start = time.perf_counter()
             fused_with_scores, _ = _rrf_fuse_with_scores(dense_docs, sparse_docs)
+            if plan.scope == "all":
+                fused_with_scores = sorted(
+                    [(
+                        score * (
+                            SECONDARY_RETRIEVAL_WEIGHT
+                            if str((doc.metadata or {}).get("retrieval_tier", "primary")) == "secondary"
+                            else PRIMARY_RETRIEVAL_WEIGHT
+                        ),
+                        doc,
+                    ) for score, doc in fused_with_scores],
+                    key=lambda item: item[0], reverse=True,
+                )
             debug["timing_ms"]["rrf"] = round((time.perf_counter() - rrf_start) * 1000, 2)
             fused_docs = [doc for _, doc in fused_with_scores]
 

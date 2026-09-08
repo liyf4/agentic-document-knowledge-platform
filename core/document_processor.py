@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 from typing import Any, List, Tuple
 
 import pandas as pd
@@ -15,17 +16,30 @@ from config import (
     CHUNK_OVERLAP,
     CHUNK_SIZE,
     DATA_DIR,
+    DOCUMENT_STRUCTURE_VERSION,
     LLM_MODEL_NAME,
     LLM_TYPE,
     MAX_CHUNKS_PER_FILE,
     MAX_UPLOAD_MB,
+    METADATA_ENABLED,
+    METADATA_EXTRACTOR_VERSION,
+    METADATA_LLM_EXTRACTION_ENABLED,
+    METADATA_LLM_MAX_RETRIES,
+    METADATA_LLM_TIMEOUT_SECONDS,
     ZAI_API_BASE,
 )
 from core.factory import ComponentFactory
 from core.document_loaders import load_documents, supported_extensions
+from core.document_analysis import build_document_analysis
 from core.persistent_storage import StorageValidationError, get_persistent_file_store
 from core.retriever import get_embedding_model, invalidate_retriever_cache
-from db.file_manager import delete_uploaded_file, get_uploaded_file, update_uploaded_file
+from db.file_manager import (
+    delete_document_analysis,
+    delete_uploaded_file,
+    get_uploaded_file,
+    replace_document_analysis,
+    update_uploaded_file,
+)
 from db.session_manager import (
     delete_session_document,
     update_session_summary,
@@ -37,6 +51,15 @@ class DocumentProcessor:
     """Load, split, index, summarize, and reindex uploaded documents."""
 
     SUPPORTED_EXTENSIONS = set(supported_extensions())
+
+    @staticmethod
+    def _metadata_failure_status(exc: Exception) -> str:
+        text = str(exc).casefold()
+        type_name = type(exc).__name__.casefold()
+        return "llm_timeout" if (
+            isinstance(exc, TimeoutError) or "timeout" in type_name
+            or "timeout" in text or "timed out" in text
+        ) else "partial"
 
     @staticmethod
     def _max_upload_bytes() -> int:
@@ -125,14 +148,28 @@ class DocumentProcessor:
                 session_id=session_id, file_id=file_id, file_name=record["original_name"],
                 file_hash=record["sha256"], chunk_count=len(splits), status="completed", file_path=file_path,
             )
-            try:
-                DocumentProcessor._generate_summary(splits, session_id, os.getenv("ZAI_API_KEY"))
-            except Exception as summary_exc:
-                logger.warning(f"Summary generation skipped after indexing {record['original_name']}: {summary_exc}")
             invalidate_retriever_cache(session_id)
+            DocumentProcessor._start_optional_enrichment(
+                splits=splits, session_id=session_id, file_id=file_id, file_path=file_path,
+                file_name=record["original_name"], api_key=os.getenv("ZAI_API_KEY"),
+            )
             return True, f"Document indexed with {len(splits)} chunks."
         except Exception as exc:
-            update_uploaded_file(file_id, parse_status="failed", index_status="failed")
+            updates = {"parse_status": "failed", "index_status": "failed"}
+            if "OCR is required" in str(exc) or "scanned" in str(exc).casefold():
+                updates["ocr_status"] = "required"
+            update_uploaded_file(file_id, **updates)
+            if METADATA_ENABLED:
+                try:
+                    replace_document_analysis(
+                        session_id, file_id,
+                        {"file_name": record["original_name"], "ocr_required": updates.get("ocr_status") == "required"},
+                        [], [], extraction_status="failed", extraction_error=str(exc),
+                        extractor_version=METADATA_EXTRACTOR_VERSION,
+                        structure_version=DOCUMENT_STRUCTURE_VERSION,
+                    )
+                except Exception as metadata_exc:
+                    logger.warning(f"Could not persist failed metadata state for {file_id}: {metadata_exc}")
             logger.exception(f"Failed to index stored file {file_id}")
             return False, f"Process failed: {exc}"
 
@@ -191,6 +228,15 @@ class DocumentProcessor:
             split.metadata["file_hash"] = file_hash
             split.metadata["chunk_index"] = idx
             split.metadata["chunk_id"] = f"{file_id}_{idx}"
+        current_heading_id = ""
+        for idx, split in enumerate(splits):
+            split.metadata["previous_chunk_id"] = f"{file_id}_{idx - 1}" if idx > 0 else ""
+            split.metadata["next_chunk_id"] = f"{file_id}_{idx + 1}" if idx + 1 < len(splits) else ""
+            if split.metadata.get("chunk_kind") == "heading":
+                current_heading_id = split.metadata["chunk_id"]
+                split.metadata["parent_chunk_id"] = ""
+            else:
+                split.metadata["parent_chunk_id"] = current_heading_id
             split.metadata = DocumentProcessor._sanitize_metadata(split.metadata)
 
         persist_dir = f"{DATA_DIR}/{session_id}/chroma"
@@ -214,7 +260,61 @@ class DocumentProcessor:
             documents=splits,
             ids=[split.metadata["chunk_id"] for split in splits],
         )
+        if METADATA_ENABLED:
+            try:
+                metadata, facts, blocks = build_document_analysis(
+                    splits, file_path=file_path, file_name=file_name, file_id=file_id, session_id=session_id,
+                    include_llm=False,
+                )
+                pending_llm = bool(METADATA_LLM_EXTRACTION_ENABLED and os.getenv("ZAI_API_KEY"))
+                replace_document_analysis(
+                    session_id, file_id, metadata, facts, blocks,
+                    extraction_status="partial" if pending_llm else "completed",
+                    extractor_version=METADATA_EXTRACTOR_VERSION,
+                    structure_version=DOCUMENT_STRUCTURE_VERSION,
+                )
+            except Exception as analysis_exc:
+                logger.warning(f"Document metadata extraction failed for {file_id}: {analysis_exc}")
+                replace_document_analysis(
+                    session_id, file_id, {}, [], [], extraction_status="failed",
+                    extraction_error=str(analysis_exc), extractor_version=METADATA_EXTRACTOR_VERSION,
+                    structure_version=DOCUMENT_STRUCTURE_VERSION,
+                )
         return splits
+
+    @staticmethod
+    def _start_optional_enrichment(
+        *, splits: List[Document], session_id: str, file_id: str, file_path: str,
+        file_name: str, api_key: str | None,
+    ) -> None:
+        """Run optional metadata LLM and summary after the document is queryable."""
+        if not api_key:
+            return
+
+        def run() -> None:
+            if METADATA_ENABLED and METADATA_LLM_EXTRACTION_ENABLED:
+                try:
+                    metadata, facts, blocks = build_document_analysis(
+                        splits, file_path=file_path, file_name=file_name, file_id=file_id,
+                        session_id=session_id, include_llm=True, raise_on_llm_error=True,
+                    )
+                    replace_document_analysis(
+                        session_id, file_id, metadata, facts, blocks, extraction_status="completed",
+                        extractor_version=METADATA_EXTRACTOR_VERSION,
+                        structure_version=DOCUMENT_STRUCTURE_VERSION,
+                    )
+                except Exception as exc:
+                    status = DocumentProcessor._metadata_failure_status(exc)
+                    logger.warning(f"Optional metadata enrichment ended with status={status} for {file_id}: {exc}")
+                    # Preserve deterministic facts and blocks; update only the existing status/error fields.
+                    from db.file_manager import update_document_metadata_status
+                    update_document_metadata_status(file_id, status, str(exc))
+            try:
+                DocumentProcessor._generate_summary(splits, session_id, api_key)
+            except Exception as summary_exc:
+                logger.warning(f"Summary generation skipped after indexing {file_name}: {summary_exc}")
+
+        threading.Thread(target=run, name=f"metadata-enrichment-{file_id[:8]}", daemon=True).start()
 
     @staticmethod
     def _generate_summary(splits: List[Document], session_id: str, api_key: str):
@@ -230,6 +330,8 @@ class DocumentProcessor:
                 api_key=api_key,
                 base_url=ZAI_API_BASE,
                 model_name=LLM_MODEL_NAME,
+                timeout=METADATA_LLM_TIMEOUT_SECONDS,
+                max_retries=METADATA_LLM_MAX_RETRIES,
             )
             summary = summary_llm.invoke(f"Summarize this document in 300 Chinese characters or fewer:\n{preview_text}").content
             update_session_summary(session_id, summary)
@@ -247,6 +349,7 @@ def delete_document(session_id: str, file_id: str) -> Tuple[bool, str]:
     persist_dir = f"{DATA_DIR}/{session_id}/chroma"
     doc_meta = get_uploaded_file(session_id, file_id)
     if not os.path.exists(persist_dir):
+        delete_document_analysis(file_id)
         if doc_meta:
             get_persistent_file_store().remove_upload(doc_meta)
         delete_session_document(session_id, file_id)
@@ -267,6 +370,7 @@ def delete_document(session_id: str, file_id: str) -> Tuple[bool, str]:
         if ids:
             vectorstore.delete(ids=ids)
 
+        delete_document_analysis(file_id)
         if doc_meta:
             get_persistent_file_store().remove_upload(doc_meta)
         delete_session_document(session_id, file_id)

@@ -1,0 +1,10 @@
+task_id,project,owner,action,due_date,status,priority
+AT-101,Atlas,Alice,Freeze payment API schema,2025-06-18,done,high
+AT-102,Atlas,Bob,Add payment contract tests,2025-06-25,in_progress,high
+AT-103,Atlas,Chen,Stabilize integration environment,2025-06-28,blocked,medium
+BC-201,Beacon,Morgan,Create daily warehouse freshness check,2025-06-20,done,high
+BC-202,Beacon,Riley,Rebuild customer segmentation query,2025-06-24,in_progress,medium
+BC-203,Beacon,Taylor,Document dashboard ownership,2025-06-27,todo,low
+CY-301,Cygnus,Nora,Add low-confidence manual review,2025-06-12,done,high
+CY-302,Cygnus,Sam,Write citation display tests,2025-06-15,in_progress,medium
+CY-303,Cygnus,Uma,Prepare failure-case report,2025-06-30,todo,medium

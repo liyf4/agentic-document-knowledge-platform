@@ -10,11 +10,14 @@ from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage
 
 from config import ASYNC_UPLOAD_THRESHOLD_MB
-from core.agent import create_agent_executor
+from core.agent import build_agent_system_prompt_preview, create_agent_executor
+from core.context_manager import ContextLimitError, make_usage_snapshot, prepare_session_context
 from core.document_processor import delete_document, process_file, reindex_document
 from core.history import get_session_history
 from core.indexing_jobs import list_index_tasks, submit_process_file
 from core.retriever import clear_last_retrieval_debug, get_last_retrieval_debug
+from core.request_router import route_chat_request
+from core.orchestration import run_orchestration
 from core.trace import get_recent_traces, get_trace_statistics, init_trace_db, record_chat_trace
 from db.session_manager import (
     create_new_session,
@@ -24,6 +27,7 @@ from db.session_manager import (
     init_meta_db,
     update_session_title,
 )
+from db.file_manager import init_file_db
 
 load_dotenv()
 
@@ -232,6 +236,7 @@ def _render_sidebar(curr_id: str) -> None:
 
 def main():
     init_meta_db()
+    init_file_db()
     init_trace_db()
     curr_id = _ensure_session()
     _render_sidebar(curr_id)
@@ -264,7 +269,33 @@ def main():
         st.error("请先在 .env 中配置 ZAI_API_KEY")
         st.stop()
 
-    agent_chain = create_agent_executor(curr_id)
+    route_decision = route_chat_request(curr_id, prompt)
+    orchestration_context, orchestration_tool_calls, orchestration_debug = run_orchestration(
+        curr_id, prompt, route_decision
+    )
+    try:
+        prompt_preview = build_agent_system_prompt_preview(
+            curr_id,
+            user_input=prompt,
+            allowed_tools=route_decision.allowed_tools,
+            route=route_decision.route,
+            orchestration_context=orchestration_context,
+        )
+        context_plan = prepare_session_context(
+            curr_id,
+            prompt,
+            static_texts=[prompt_preview],
+            tool_names=route_decision.allowed_tools,
+        )
+    except ContextLimitError as exc:
+        st.error(str(exc))
+        st.stop()
+    agent_chain = create_agent_executor(
+        curr_id, user_input=prompt, allowed_tools=route_decision.allowed_tools,
+        route=route_decision.route, orchestration_context=orchestration_context,
+        history_messages=context_plan.visible_messages,
+        conversation_summary=context_plan.conversation_summary,
+    )
     if agent_chain is None:
         st.error("Agent 初始化失败，请检查模型配置和 API Key。")
         st.stop()
@@ -282,8 +313,9 @@ def main():
                 )
 
                 final_answer = response.get("output", "")
+                make_usage_snapshot(context_plan, final_answer)
                 intermediate_steps = response.get("intermediate_steps", [])
-                tool_calls = [
+                tool_calls = list(orchestration_tool_calls) + [
                     {
                         "tool": action.tool,
                         "input": action.tool_input,
@@ -302,11 +334,14 @@ def main():
                             st.markdown(f"**输出预览:** {str(observation)[:800]}")
 
                 _render_retrieval_debug(curr_id)
+                retrieval_debug = get_last_retrieval_debug(curr_id)
+                retrieval_debug.update(route_decision.to_debug())
+                retrieval_debug["orchestration"] = orchestration_debug
                 record_chat_trace(
                     session_id=curr_id,
                     user_input=prompt,
                     answer=final_answer,
-                    retrieval_debug=get_last_retrieval_debug(curr_id),
+                    retrieval_debug=retrieval_debug,
                     tool_calls=tool_calls,
                 )
 

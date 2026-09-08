@@ -1,4 +1,5 @@
 import sqlite3
+import json
 import uuid
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -44,6 +45,10 @@ def init_meta_db():
             """
         )
         _ensure_column(conn, "session_documents", "file_path", "file_path TEXT")
+        _ensure_column(conn, "sessions", "conversation_summary", "conversation_summary TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "sessions", "summarized_message_count", "summarized_message_count INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "sessions", "context_usage_json", "context_usage_json TEXT NOT NULL DEFAULT '{}'")
+        _ensure_column(conn, "sessions", "last_compacted_at", "last_compacted_at TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -98,7 +103,71 @@ def get_session_summary(session_id):
         conn.close()
 
 
+def get_conversation_context_state(session_id: str) -> Dict[str, object]:
+    conn = _connect()
+    try:
+        row = conn.execute(
+            """
+            SELECT COALESCE(conversation_summary, ''), COALESCE(summarized_message_count, 0),
+                   COALESCE(context_usage_json, '{}'), last_compacted_at
+            FROM sessions WHERE id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        if not row:
+            return {"conversation_summary": "", "summarized_message_count": 0,
+                    "context_usage": {}, "last_compacted_at": None}
+        try:
+            usage = json.loads(row[2] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            usage = {}
+        return {
+            "conversation_summary": str(row[0] or ""),
+            "summarized_message_count": int(row[1] or 0),
+            "context_usage": usage if isinstance(usage, dict) else {},
+            "last_compacted_at": row[3],
+        }
+    finally:
+        conn.close()
+
+
+def update_conversation_summary(
+    session_id: str, summary: str, summarized_message_count: int, compacted_at: str
+) -> None:
+    conn = _connect()
+    try:
+        conn.execute(
+            """
+            UPDATE sessions
+            SET conversation_summary = ?, summarized_message_count = ?, last_compacted_at = ?
+            WHERE id = ?
+            """,
+            (summary, int(summarized_message_count), compacted_at, session_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_context_usage(session_id: str, usage: Dict[str, object]) -> None:
+    conn = _connect()
+    try:
+        conn.execute(
+            "UPDATE sessions SET context_usage_json = ? WHERE id = ?",
+            (json.dumps(usage or {}, ensure_ascii=False), session_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def delete_session_data(session_id):
+    # Chat history lives in a separate LangChain database and must be cleared too.
+    try:
+        from core.history import get_session_history
+        get_session_history(session_id).clear()
+    except Exception:
+        pass
     conn = _connect()
     try:
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
@@ -109,6 +178,9 @@ def delete_session_data(session_id):
         if sandbox_table:
             conn.execute("DELETE FROM session_sandboxes WHERE session_id = ?", (session_id,))
         for table, column in (
+            ("document_facts", "session_id"),
+            ("document_blocks", "session_id"),
+            ("document_metadata", "session_id"),
             ("workspace_manifest_entries", "session_id"),
             ("artifacts", "source_session_id"),
             ("uploaded_files", "session_id"),

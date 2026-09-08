@@ -11,6 +11,9 @@ data_cfg = config.get("data", {})
 logging_cfg = config.get("logging", {})
 agent_cfg = config.get("agent", {})
 sandbox_cfg = config.get("sandbox", {})
+metadata_cfg = config.get("metadata", {})
+orchestration_cfg = config.get("orchestration", {})
+context_cfg = config.get("context", {})
 
 # --- Database Settings ---
 DB_NAME = database_cfg.get("db_name", "chat_meta.db")
@@ -22,6 +25,16 @@ LLM_MODEL_NAME = llm_cfg.get("model_name", "glm-4-flash")
 EMBEDDING_TYPE = embedding_cfg.get("type", "HuggingFaceEmbeddings")
 EMBEDDING_MODEL_NAME = embedding_cfg.get("model_name", "all-MiniLM-L6-v2")
 ZAI_API_BASE = llm_cfg.get("zai_api_base", "https://open.bigmodel.cn/api/paas/v4/")
+LLM_CONTEXT_WINDOW_TOKENS = int(llm_cfg.get("context_window_tokens", 131072))
+LLM_OUTPUT_RESERVE_TOKENS = int(llm_cfg.get("output_reserve_tokens", 8192))
+
+# --- Conversation context management ---
+CONTEXT_COMPACT_TRIGGER_RATIO = float(context_cfg.get("compact_trigger_ratio", 0.85))
+CONTEXT_COMPACT_TARGET_RATIO = float(context_cfg.get("compact_target_ratio", 0.30))
+CONTEXT_ESTIMATE_SAFETY_RATIO = float(context_cfg.get("estimate_safety_ratio", 0.10))
+CONTEXT_SUMMARY_MAX_TOKENS = int(context_cfg.get("summary_max_tokens", 3000))
+CONTEXT_TOOL_GROWTH_RESERVE_TOKENS = int(context_cfg.get("tool_growth_reserve_tokens", 8192))
+CONTEXT_TOOL_OBSERVATION_MAX_TOKENS = int(context_cfg.get("tool_observation_max_tokens", 12000))
 
 # --- Retriever Settings ---
 RETRIEVER_TYPE = retriever_cfg.get("type", "HybridRRFRetriever")
@@ -43,6 +56,36 @@ CHUNK_OVERLAP = retriever_cfg.get("chunk_overlap", 120)
 ENABLE_HYDE = retriever_cfg.get("enable_hyde", True)
 HYDE_MAX_QUERY_LENGTH = retriever_cfg.get("hyde_max_query_length", 200)
 HYDE_MAX_OUTPUT_CHARS = retriever_cfg.get("hyde_max_output_chars", 180)
+PRIMARY_RETRIEVAL_WEIGHT = float(retriever_cfg.get("primary_retrieval_weight", 1.0))
+SECONDARY_RETRIEVAL_WEIGHT = float(retriever_cfg.get("secondary_retrieval_weight", 0.35))
+
+# --- Structured document metadata ---
+METADATA_ENABLED = bool(metadata_cfg.get("enabled", True))
+METADATA_LLM_EXTRACTION_ENABLED = bool(metadata_cfg.get("llm_extraction_enabled", True))
+METADATA_LLM_TIMEOUT_SECONDS = float(metadata_cfg.get("llm_timeout_seconds", 20))
+METADATA_LLM_MAX_RETRIES = int(metadata_cfg.get("llm_max_retries", 0))
+METADATA_LLM_EXTRACTION_TIMEOUT_SECONDS = float(
+    metadata_cfg.get("llm_extraction_timeout_seconds", METADATA_LLM_TIMEOUT_SECONDS)
+)
+METADATA_LLM_EXTRACTION_MAX_RETRIES = int(
+    metadata_cfg.get("llm_extraction_max_retries", METADATA_LLM_MAX_RETRIES)
+)
+METADATA_LLM_EXTRACTION_MAX_CHUNKS = int(metadata_cfg.get("llm_extraction_max_chunks", 10))
+METADATA_LLM_EXTRACTION_CHARS_PER_CHUNK = int(metadata_cfg.get("llm_extraction_chars_per_chunk", 800))
+METADATA_LLM_EXTRACTION_INPUT_CHARS = int(metadata_cfg.get("llm_extraction_input_chars", 8000))
+METADATA_LLM_EXTRACTION_MAX_TOKENS = int(metadata_cfg.get("llm_extraction_max_tokens", 2048))
+METADATA_EXTRACTOR_VERSION = str(metadata_cfg.get("extractor_version", "metadata-v1"))
+DOCUMENT_STRUCTURE_VERSION = int(metadata_cfg.get("structure_version", 1))
+HEADER_FOOTER_REPEAT_RATIO = float(metadata_cfg.get("header_footer_repeat_ratio", 0.6))
+COVER_MAX_PAGES = int(metadata_cfg.get("cover_max_pages", 2))
+TOC_MAX_PAGES = int(metadata_cfg.get("toc_max_pages", 8))
+
+# --- Optional multi-agent orchestration ---
+ORCHESTRATION_ENABLED = bool(orchestration_cfg.get("enabled", True))
+ORCHESTRATION_MAX_WORKERS = int(orchestration_cfg.get("max_workers", 3))
+ORCHESTRATION_MAX_TOOL_CALLS_PER_WORKER = int(orchestration_cfg.get("max_tool_calls_per_worker", 4))
+ORCHESTRATION_MAX_REDISPATCHES = int(orchestration_cfg.get("max_redispatches", 1))
+ORCHESTRATION_MIN_INDEPENDENT_SUBTASKS = int(orchestration_cfg.get("min_independent_subtasks", 3))
 
 # --- Loader Settings ---
 LOADER_TYPE = config.get("loader", {}).get("type", "UnstructuredFileLoader")

@@ -44,11 +44,11 @@ temp/
 .cache/
 
 # Tests, evaluations, coverage and generated reports
+# Test sources and deterministic fixtures are versioned. Only generated output is ignored.
 backend_tests/
-eval/
-tests/
 test-results/
 reports/
+eval/reports/
 htmlcov/
 .coverage
 .coverage.*
@@ -75,6 +75,7 @@ nosetests.xml
 !README.md
 !requirements.txt
 !skills/**/SKILL.md
+!tests/fixtures/**/*.md
 
 # Python bytecode, environments and build artifacts
 __pycache__/

@@ -6,6 +6,16 @@ llm:
   type: "ChatOpenAI"
   model_name: "glm-4-flash"
   zai_api_base: "https://open.bigmodel.cn/api/paas/v4/"
+  context_window_tokens: 131072
+  output_reserve_tokens: 8192
+
+context:
+  compact_trigger_ratio: 0.85
+  compact_target_ratio: 0.30
+  estimate_safety_ratio: 0.10
+  summary_max_tokens: 3000
+  tool_growth_reserve_tokens: 8192
+  tool_observation_max_tokens: 12000
 
 embedding:
   type: "HuggingFaceEmbeddings"
@@ -31,6 +41,32 @@ retriever:
   enable_hyde: true
   hyde_max_query_length: 200
   hyde_max_output_chars: 180
+  primary_retrieval_weight: 1.0
+  secondary_retrieval_weight: 0.35
+
+metadata:
+  enabled: true
+  llm_extraction_enabled: true
+  llm_timeout_seconds: 20
+  llm_max_retries: 0
+  llm_extraction_timeout_seconds: 60
+  llm_extraction_max_retries: 1
+  llm_extraction_max_chunks: 10
+  llm_extraction_chars_per_chunk: 800
+  llm_extraction_input_chars: 8000
+  llm_extraction_max_tokens: 2048
+  extractor_version: "metadata-v2"
+  structure_version: 1
+  header_footer_repeat_ratio: 0.6
+  cover_max_pages: 2
+  toc_max_pages: 8
+
+orchestration:
+  enabled: true
+  max_workers: 3
+  max_tool_calls_per_worker: 4
+  max_redispatches: 1
+  min_independent_subtasks: 3
 
 loader:
   type: "UnstructuredFileLoader"

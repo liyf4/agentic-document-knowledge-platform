@@ -7,6 +7,7 @@ from config import (
     SANDBOX_ALLOWED_EGRESS,
     SANDBOX_API_KEY_ENV,
     SANDBOX_COMMAND_TIMEOUT_SECONDS,
+    CONTEXT_TOOL_OBSERVATION_MAX_TOKENS,
     SANDBOX_CPU,
     SANDBOX_DOMAIN,
     SANDBOX_ENABLED,
@@ -271,9 +272,12 @@ class WorkspaceSandboxManager:
 
     def _truncate(self, value: str) -> str:
         text = str(value or "")
-        if len(text) <= self.max_output_chars:
+        context_char_limit = max(1000, CONTEXT_TOOL_OBSERVATION_MAX_TOKENS * 3)
+        effective_limit = min(self.max_output_chars, context_char_limit)
+        if len(text) <= effective_limit:
             return text
-        return text[: self.max_output_chars] + "\n... <sandbox output truncated>"
+        half = max(1, (effective_limit - 64) // 2)
+        return text[:half] + "\n... <sandbox output truncated for context budget> ...\n" + text[-half:]
 
     def _touch(self, session_id: str) -> None:
         if self.persistence:

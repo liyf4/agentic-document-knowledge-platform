@@ -352,7 +352,7 @@ def build_trace_payload(
         "tool_call_count": len([call for call in calls if isinstance(call, dict)]),
         "retry_count": retry_count,
         "first_token_latency_ms": None,
-        "token_usage": {},
+        "token_usage": dict(debug.get("context_usage") or {}),
         "estimated_cost": None,
         "answer_chars": len(answer or ""),
         "error": str(error or ""),

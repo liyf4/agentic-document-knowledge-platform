@@ -1,10 +1,20 @@
+import hashlib
+import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
+from utils.ssl_compat import prefer_certifi_default_context
+
+prefer_certifi_default_context()
+
 from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
+from langchain_classic.agents.format_scratchpad.tools import format_to_tool_messages
+from langchain_classic.agents.output_parsers.tools import ToolsAgentOutputParser
 from langchain_core.documents import Document
+from langchain_core.messages import SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.runnables import RunnablePassthrough
 from langchain_core.tools import tool
 from loguru import logger
 
@@ -15,19 +25,64 @@ from config import (
     AGENT_ENABLE_CODE_EXECUTION,
     AGENT_MAX_EXECUTION_TIME_SECONDS,
     AGENT_MAX_ITERATIONS,
+    CONTEXT_TOOL_OBSERVATION_MAX_TOKENS,
     LLM_MODEL_NAME,
     LLM_TYPE,
     ZAI_API_BASE,
 )
 from core.factory import ComponentFactory
-from core.history import get_async_session_history, get_session_history
+from core.history import get_async_session_history, get_session_history, get_windowed_session_history
 from core.query_transform import generate_hyde_query
 from core.retriever import load_retriever, retrieve_with_rerank_debug, set_last_retrieval_debug
 from db.skill_manager import match_skills
 from tools.code_runner import create_python_code_tool
+from tools.document_metadata import create_document_metadata_tool, query_session_document_metadata
 from tools.system import get_current_time
-from tools.web_search import read_website, web_search
+from tools.web_search import read_web_page, read_website, search_web_candidates, web_search
 from tools.workspace import create_workspace_tools
+from prompts.builder import PromptContext, build_system_prompt
+
+
+def build_document_evidence(reranked_docs: List[Tuple[float, Document]]) -> List[Dict[str, Any]]:
+    """Convert retrieval hits into stable evidence without joining adjacent sections."""
+    evidence: List[Dict[str, Any]] = []
+    for score, doc in reranked_docs:
+        metadata = dict(doc.metadata or {})
+        chunk_id = str(metadata.get("chunk_id") or metadata.get("id") or "unknown")
+        identity = "|".join((
+            str(metadata.get("file_id", "")), chunk_id,
+            str(metadata.get("section_path", "")), doc.page_content,
+        ))
+        evidence.append({
+            "evidence_id": "doc_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16],
+            "kind": "document",
+            "file_id": str(metadata.get("file_id", "")),
+            "file_name": str(metadata.get("source", "Unknown source")),
+            "page": metadata.get("page"),
+            "printed_page": metadata.get("printed_page", ""),
+            "section_path": str(metadata.get("section_path", "")),
+            "chunk_id": chunk_id,
+            "chunk_kind": str(metadata.get("chunk_kind", "text")),
+            "text": doc.page_content,
+            "score": float(score),
+        })
+    return evidence
+
+
+def group_document_evidence(evidence: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Group evidence while preserving section and block-type boundaries."""
+    groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
+    for item in evidence:
+        key = (
+            str(item.get("file_id", "")),
+            str(item.get("section_path", "")),
+            str(item.get("chunk_kind", "text")),
+        )
+        groups.setdefault(key, []).append(item)
+    return [
+        {"file_id": key[0], "section_path": key[1], "chunk_kind": key[2], "evidence": values}
+        for key, values in groups.items()
+    ]
 
 
 def _format_evidence(reranked_docs: List[Tuple[float, Document]]) -> str:
@@ -39,10 +94,14 @@ def _format_evidence(reranked_docs: List[Tuple[float, Document]]) -> str:
         metadata = doc.metadata or {}
         source = metadata.get("source", "未知来源")
         page = metadata.get("page")
+        printed_page = metadata.get("printed_page")
+        section_path = metadata.get("section_path")
         chunk_id = metadata.get("chunk_id", metadata.get("id", "unknown"))
         page_text = f", page={page}" if page is not None else ""
+        printed_text = f", printed_page={printed_page}" if printed_page else ""
+        section_text = f", section={section_path}" if section_path else ""
         lines.append(
-            f"[{idx}] score={score:.4f}, source={source}{page_text}, chunk_id={chunk_id}\n"
+            f"[{idx}] score={score:.4f}, source={source}{page_text}{printed_text}{section_text}, chunk_id={chunk_id}\n"
             f"{doc.page_content}"
         )
     return "\n\n".join(lines)
@@ -53,6 +112,15 @@ def _truncate_skill_text(value: Any, limit: int) -> str:
     if len(text) <= limit:
         return text
     return f"{text[:limit]}\n... <truncated>"
+
+
+def _bounded_tool_observation(value: Any) -> str:
+    text = str(value or "")
+    char_limit = max(1000, CONTEXT_TOOL_OBSERVATION_MAX_TOKENS * 3)
+    if len(text) <= char_limit:
+        return text
+    half = max(1, (char_limit - 80) // 2)
+    return f"{text[:half]}\n... <tool observation truncated for context budget> ...\n{text[-half:]}"
 
 
 def _format_skills_for_prompt(skills: List[Dict[str, Any]]) -> str:
@@ -85,6 +153,33 @@ def _format_skills_for_prompt(skills: List[Dict[str, Any]]) -> str:
     return "\n\n".join(blocks)
 
 
+def build_agent_system_prompt_preview(
+    session_id: str,
+    *,
+    selected_skills: Optional[List[Dict[str, Any]]] = None,
+    user_input: str = "",
+    prefetched_context: str = "",
+    skill_context: str = "",
+    allowed_tools: Optional[List[str]] = None,
+    route: str = "general_chat",
+    mode: str = "chat",
+    orchestration_context: str = "",
+) -> str:
+    """Build the non-history prompt text for preflight token budgeting."""
+    _retriever, doc_summary = load_retriever(session_id)
+    skills = selected_skills if selected_skills is not None else match_skills(user_input)
+    return build_system_prompt(PromptContext(
+        route=route,
+        mode=mode,
+        allowed_tools=list(allowed_tools or []),
+        document_summary=doc_summary,
+        prefetched_context=prefetched_context,
+        skill_context=skill_context,
+        skill_prompt=_format_skills_for_prompt(skills),
+        orchestration_context=orchestration_context,
+    ))
+
+
 def retrieve_session_knowledge(session_id: str, query: str) -> str:
     retriever, _doc_summary = load_retriever(session_id)
     if not retriever:
@@ -112,6 +207,40 @@ def retrieve_session_knowledge(session_id: str, query: str) -> str:
         return f"Retrieval failed: {exc}"
 
 
+def retrieve_session_evidence(session_id: str, query: str) -> Dict[str, Any]:
+    """Retrieve structured document evidence for an already-executed worker call."""
+    retriever, _doc_summary = load_retriever(session_id)
+    if not retriever:
+        return {"ok": False, "error_code": "NO_INDEXED_DOCUMENTS", "evidence": [], "claims": []}
+    try:
+        search_query, hyde_debug = generate_hyde_query(query)
+        reranked_docs, retrieval_debug = retrieve_with_rerank_debug(search_query, retriever)
+        retrieval_debug.update({"original_query": query, "search_query": search_query, "hyde": hyde_debug})
+        set_last_retrieval_debug(session_id, retrieval_debug)
+        evidence = build_document_evidence(reranked_docs)
+        claims = [
+            {
+                "claim": str(item["text"])[:500],
+                "evidence_ids": [str(item["evidence_id"])],
+                "section_path": str(item.get("section_path", "")),
+            }
+            for item in evidence
+        ]
+        return {
+            "ok": bool(evidence),
+            "error_code": "" if evidence else "INSUFFICIENT_DOCUMENT_EVIDENCE",
+            "evidence": evidence,
+            "evidence_groups": group_document_evidence(evidence),
+            "claims": claims,
+        }
+    except Exception as exc:
+        logger.exception("Structured document retrieval failed")
+        return {
+            "ok": False, "error_code": "DOCUMENT_RETRIEVAL_FAILED", "error": str(exc),
+            "evidence": [], "claims": [],
+        }
+
+
 def create_agent_executor(
     session_id: str,
     async_history: bool = False,
@@ -122,6 +251,11 @@ def create_agent_executor(
     allowed_tools: Optional[List[str]] = None,
     route: str = "general_chat",
     mode: str = "chat",
+    orchestration_context: str = "",
+    tool_call_limits: Optional[Dict[str, int]] = None,
+    artifact_requirements: Optional[Dict[str, Any]] = None,
+    history_messages: Optional[List[Any]] = None,
+    conversation_summary: str = "",
 ):
     zai_api_key = os.getenv("ZAI_API_KEY")
     google_api_key = os.getenv("GOOGLE_API_KEY")
@@ -163,14 +297,56 @@ def create_agent_executor(
             logger.error(f"Retrieval tool error: {exc}")
             return f"检索出错: {exc}"
 
-    requested_tools = set(allowed_tools or ["retrieve_knowledge", "read_website", "web_search", "get_current_time", "run_python_code"])
+    call_counts: Dict[str, int] = {}
+
+    def _within_limit(name: str) -> bool:
+        limit = int((tool_call_limits or {}).get(name, 10**9))
+        used = call_counts.get(name, 0)
+        if used >= limit:
+            return False
+        call_counts[name] = used + 1
+        return True
+
+    @tool("retrieve_knowledge")
+    def limited_retrieve_knowledge(query: str) -> str:
+        """Retrieve uploaded-document evidence within the Supervisor remediation budget."""
+        if not _within_limit("retrieve_knowledge"):
+            return json.dumps({"ok": False, "error_code": "REMEDIATION_LIMIT_REACHED"})
+        return _bounded_tool_observation(retrieve_session_knowledge(session_id, query))
+
+    @tool("query_document_metadata")
+    def limited_document_metadata(query: str, file_id: str = "", fact_types: str = "") -> str:
+        """Query document metadata within the Supervisor remediation budget."""
+        if not _within_limit("query_document_metadata"):
+            return json.dumps({"ok": False, "error_code": "REMEDIATION_LIMIT_REACHED"})
+        return _bounded_tool_observation(query_session_document_metadata(session_id, query, file_id, fact_types))
+
+    @tool("web_search")
+    def limited_web_search(query: str) -> str:
+        """Search candidate web sources within the Supervisor remediation budget."""
+        if not _within_limit("web_search"):
+            return json.dumps({"ok": False, "error_code": "REMEDIATION_LIMIT_REACHED"})
+        return _bounded_tool_observation(json.dumps(search_web_candidates(query), ensure_ascii=False, default=str))
+
+    @tool("read_website")
+    def limited_read_website(url: str) -> str:
+        """Open a web source within the Supervisor remediation budget."""
+        if not _within_limit("read_website"):
+            return json.dumps({"ok": False, "error_code": "REMEDIATION_LIMIT_REACHED"})
+        return _bounded_tool_observation(json.dumps(read_web_page(url), ensure_ascii=False, default=str))
+
+    requested_tools = set(allowed_tools or [
+        "retrieve_knowledge", "query_document_metadata", "read_website", "web_search",
+        "get_current_time", "run_python_code",
+    ])
     tool_registry = {
-        "retrieve_knowledge": retrieve_knowledge,
-        "read_website": read_website,
+        "retrieve_knowledge": limited_retrieve_knowledge,
+        "query_document_metadata": limited_document_metadata,
+        "read_website": limited_read_website,
         "get_current_time": get_current_time,
     }
     if enable_web_search:
-        tool_registry["web_search"] = web_search
+        tool_registry["web_search"] = limited_web_search
     if AGENT_ENABLE_CODE_EXECUTION:
         tool_registry["run_python_code"] = create_python_code_tool(
             session_id=session_id,
@@ -179,7 +355,11 @@ def create_agent_executor(
             max_code_chars=int(AGENT_CODE_MAX_CHARS),
         )
     if mode == "workspace":
-        tool_registry.update({item.name: item for item in create_workspace_tools(session_id)})
+        tool_registry.update({
+            item.name: item for item in create_workspace_tools(
+                session_id, artifact_requirements=artifact_requirements,
+            )
+        })
     tools = [tool for name, tool in tool_registry.items() if name in requested_tools]
 
     llm = ComponentFactory.get_component(
@@ -192,92 +372,42 @@ def create_agent_executor(
         streaming=True,
     )
 
-    system_text = """你是一个严谨的 AI 助手，擅长使用工具解决复杂问题。
-
-工作规则：
-1. 如果问题涉及上传文档、私有资料、当前会话知识库，必须调用 retrieve_knowledge。
-2. 如果问题包含 URL，优先调用 read_website。
-3. 如果问题需要实时或外部信息，并且 web_search 可用，可以调用 web_search。
-4. 使用本地知识库证据回答时，必须在关键结论后标注引用编号，例如 [1]、[2]；编号必须来自 retrieve_knowledge 返回的证据顺序，不允许虚构不存在的编号。
-5. 如果检索证据不足以回答，直接说明“根据当前文档无法确认”，不要编造。
-6. 回答尽量结构化、简洁，并明确区分文档内容、互联网内容和你的推理。
-"""
-
-    system_text += """
-
-Advanced agent rules:
-1. For multi-step tasks, think through the next useful step, call the right tool, inspect the observation, then continue.
-2. Use run_python_code for arithmetic, statistics, data transformations, or small algorithm checks when exact computation is useful.
-3. Do not claim that a tool was used unless a tool observation is available.
-4. Do not invent code execution, retrieval, search, or website results.
-5. Keep code snippets short and self-contained; never use code execution for files, network access, project edits, shell commands, or long-running jobs.
-"""
-
     tool_names = [str(getattr(item, "name", "")) for item in tools if getattr(item, "name", "")]
-    system_text = (
-        "You are a careful assistant. The backend has already routed this request.\n"
-        f"Route: {route}\n"
-        f"Allowed tools: {', '.join(tool_names) if tool_names else 'none'}\n"
-        "Decision policy before answering: first use any matched skill instructions supplied below; "
-        "if no skill fits and this is an uploaded-document request, use RAG evidence; "
-        "if neither skill nor RAG applies, answer directly from general knowledge. "
-        "Use only available tools. Do not invent tool results. "
-        "Do not claim a tool was used unless an observation is available.\n"
-    )
-    if mode == "workspace":
-        system_text += (
-            "Workspace mode is active. Use workspace_terminal and workspace file/process tools for tasks that require "
-            "commands, code execution, file edits, builds, or tests. All workspace paths must stay below /workspace. "
-            "For a session upload, first call workspace_list_session_files then workspace_import_uploaded_file; "
-            "write generated files below /workspace/output so they are automatically saved as artifacts. "
-            "Treat tool errors as real failures and never imply that a command succeeded without its result.\n"
-        )
-    if route == "document_qa":
-        system_text += (
-            "This is an uploaded-document question. Base document-specific claims on retrieved evidence "
-            "and cite evidence numbers when present.\n"
-        )
-    elif route == "web_search":
-        system_text += "This is an external information request. Use web tools only for external facts.\n"
-    elif route == "general_chat" and mode != "workspace":
-        system_text += "This is general chat. Do not use document retrieval, web search, or code execution.\n"
-
-    if doc_summary:
-        system_text += f"\n当前会话已加载文档摘要：\n{doc_summary}\n"
-    else:
-        system_text += "\n当前会话尚未加载本地文档。\n"
-
-    if prefetched_context.strip():
-        system_text += (
-            "\nAuto-retrieved document evidence for this request:\n"
-            f"{prefetched_context.strip()}\n"
-            "Use this evidence when it is relevant. If you cite it, use the bracketed evidence numbers already shown.\n"
-        )
-
-    if skill_context.strip():
-        system_text += (
-            "\nComputed skill workflow context for this request:\n"
-            f"{skill_context.strip()}\n"
-            "Base any workflow-specific answer on these computed values.\n"
-        )
-
     skill_prompt = _format_skills_for_prompt(skills_for_prompt)
-    if skill_prompt:
-        system_text += (
-            f"\n\n{skill_prompt}\n"
-            "A matched prompt skill is considered active for this request. Make the final answer visibly follow that skill.\n"
-        )
+    system_text = build_system_prompt(PromptContext(
+        route=route, mode=mode, allowed_tools=tool_names, document_summary=doc_summary,
+        prefetched_context=prefetched_context, skill_context=skill_context,
+        skill_prompt=skill_prompt, orchestration_context=orchestration_context,
+        conversation_summary=conversation_summary,
+    ))
 
     prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", system_text),
+            # Dynamic evidence and worker reports may contain JSON/code braces. A concrete
+            # SystemMessage keeps them as data instead of parsing them as f-string fields.
+            SystemMessage(content=system_text),
             MessagesPlaceholder(variable_name="chat_history"),
             ("human", "{input}"),
             MessagesPlaceholder(variable_name="agent_scratchpad"),
         ]
     )
 
-    agent = create_tool_calling_agent(llm, tools, prompt)
+    if tool_names == ["workspace_write_file"]:
+        # The research Workers have already completed. Force the sole remaining
+        # artifact action and stop on its observed result instead of allowing the
+        # model to spin on empty/future-action responses.
+        tools[0].return_direct = True
+        llm_with_tools = llm.bind_tools(tools, tool_choice="workspace_write_file")
+        agent = (
+            RunnablePassthrough.assign(
+                agent_scratchpad=lambda values: format_to_tool_messages(values["intermediate_steps"]),
+            )
+            | prompt
+            | llm_with_tools
+            | ToolsAgentOutputParser()
+        )
+    else:
+        agent = create_tool_calling_agent(llm, tools, prompt)
 
     agent_executor = AgentExecutor(
         agent=agent,
@@ -289,7 +419,13 @@ Advanced agent rules:
         max_execution_time=int(AGENT_MAX_EXECUTION_TIME_SECONDS),
     )
 
-    history_factory = get_async_session_history if async_history else get_session_history
+    if history_messages is None:
+        history_factory = get_async_session_history if async_history else get_session_history
+    else:
+        visible_history = list(history_messages)
+        history_factory = lambda requested_session_id: get_windowed_session_history(
+            requested_session_id, visible_history, async_mode=async_history
+        )
     return RunnableWithMessageHistory(
         agent_executor,
         history_factory,

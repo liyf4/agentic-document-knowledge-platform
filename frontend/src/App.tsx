@@ -24,6 +24,7 @@ import {
   Layout,
   List,
   Modal,
+  Progress,
   Segmented,
   Space,
   Spin,
@@ -36,7 +37,7 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, ArtifactItem, ChatMessage, ChatMode, ChatStreamEvent, Citation, DocumentItem, IndexTask, Session, TraceItem, TraceStats } from './api';
+import { api, ArtifactItem, ChatMessage, ChatMode, ChatStreamEvent, Citation, ContextUsage, DocumentItem, IndexTask, Session, TraceItem, TraceStats } from './api';
 
 const { Header, Sider, Content } = Layout;
 const { Text, Title, Paragraph } = Typography;
@@ -320,6 +321,7 @@ export default function App() {
   const [chatMode, setChatMode] = useState<ChatMode>('chat');
   const [workspaceAvailable, setWorkspaceAvailable] = useState(false);
   const [workspaceOutput, setWorkspaceOutput] = useState<string[]>([]);
+  const [contextUsage, setContextUsage] = useState<ContextUsage>();
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameTitle, setRenameTitle] = useState('');
   const [renamingSession, setRenamingSession] = useState<Session>();
@@ -340,8 +342,9 @@ export default function App() {
   const loadSessionData = useCallback(async (sessionId: string) => {
     setLoadingSession(true);
     try {
-      const [messageRes, docRes, artifactRes, taskRes, traceRes, statRes] = await Promise.all([
+      const [messageRes, contextRes, docRes, artifactRes, taskRes, traceRes, statRes] = await Promise.all([
         api.messages(sessionId),
+        api.contextUsage(sessionId),
         api.documents(sessionId),
         api.artifacts(sessionId),
         api.indexTasks(sessionId),
@@ -349,6 +352,7 @@ export default function App() {
         api.traceStats(sessionId),
       ]);
       setMessages(messageRes.messages);
+      setContextUsage(contextRes.context_usage);
       setDocuments(docRes.documents);
       setArtifacts(artifactRes.artifacts);
       setTasks(taskRes.tasks);
@@ -531,7 +535,16 @@ export default function App() {
         setWorkspaceOutput((previous) => [...previous, event.output_preview || '']);
       } else if (event.type === 'status') {
         updateLastAssistant((message) => ({ ...message, status: event.message || '正在思考' }));
+      } else if (event.type === 'context_compaction_start') {
+        updateLastAssistant((message) => ({ ...message, status: event.message || '正在压缩上下文' }));
+      } else if (event.type === 'context_compaction_end') {
+        updateLastAssistant((message) => ({ ...message, status: event.message || '上下文压缩完成' }));
+      } else if (event.type === 'context_compaction_warning') {
+        updateLastAssistant((message) => ({ ...message, status: event.message || '上下文压缩未完成' }));
       } else if (event.type === 'done') {
+        if (event.context_usage) {
+          setContextUsage(event.context_usage);
+        }
         updateLastAssistant((message) => ({
           ...message,
           content: event.answer || message.content,
@@ -766,6 +779,38 @@ export default function App() {
                   }
                 }}
               />
+              <Tooltip
+                title={(
+                  <div className="context-usage-tooltip">
+                    <div>模型：{contextUsage?.model || 'glm-4-flash'}</div>
+                    <div>
+                      已用：{(contextUsage?.used_tokens ?? 0).toLocaleString()} /
+                      {(contextUsage?.context_window_tokens ?? 131072).toLocaleString()} tokens
+                    </div>
+                    <div>
+                      输入：{(contextUsage?.prompt_tokens ?? 0).toLocaleString()}，输出：
+                      {(contextUsage?.completion_tokens ?? 0).toLocaleString()}
+                    </div>
+                    <div>统计：{contextUsage?.measurement === 'actual' ? '实际' : '估算'}</div>
+                    <div>最近压缩：{contextUsage?.last_compacted_at || '尚未压缩'}</div>
+                  </div>
+                )}
+              >
+                <Progress
+                  className="context-usage-ring"
+                  type="circle"
+                  size={44}
+                  percent={Math.min(100, Math.max(0, contextUsage?.usage_percent ?? 0))}
+                  strokeColor={
+                    (contextUsage?.usage_percent ?? 0) >= 85
+                      ? '#ef4444'
+                      : (contextUsage?.usage_percent ?? 0) >= 70
+                        ? '#f59e0b'
+                        : '#22c55e'
+                  }
+                  format={(percent) => `${Math.round(percent ?? 0)}%`}
+                />
+              </Tooltip>
               <Button type="primary" icon={<SendOutlined />} loading={sending} onClick={() => void handleSend()}>
                 发送
               </Button>

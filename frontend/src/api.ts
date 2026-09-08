@@ -10,6 +10,20 @@ export type ChatMessage = {
   citations?: Citation[];
 };
 
+export type ContextUsage = {
+  model: string;
+  context_window_tokens: number;
+  used_tokens: number;
+  usage_percent: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  measurement: 'actual' | 'estimated';
+  compacted: boolean;
+  target_unreachable?: boolean;
+  measured_at?: string | null;
+  last_compacted_at?: string | null;
+};
+
 export type ChatMode = 'chat' | 'workspace';
 
 export type WorkspaceCapabilities = {
@@ -93,6 +107,7 @@ export type ChatResponse = {
   tool_calls: Array<Record<string, unknown>>;
   retrieval_debug: Record<string, unknown>;
   citations: Citation[];
+  context_usage?: ContextUsage;
 };
 
 export type ChatStreamEvent = {
@@ -110,6 +125,7 @@ export type ChatStreamEvent = {
   output_preview?: string;
   available?: boolean;
   runtime?: Record<string, unknown> | null;
+  context_usage?: ContextUsage;
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -181,6 +197,7 @@ async function chatStream(
         tool_calls: event.tool_calls ?? [],
         retrieval_debug: event.retrieval_debug ?? {},
         citations: event.citations ?? [],
+        context_usage: event.context_usage,
       };
     }
     if (type === 'error') {
@@ -220,6 +237,8 @@ export const api = {
     }),
   deleteSession: (sessionId: string) => request<{ ok: boolean }>(`/api/sessions/${sessionId}`, { method: 'DELETE' }),
   messages: (sessionId: string) => request<{ messages: ChatMessage[] }>(`/api/sessions/${sessionId}/messages`),
+  contextUsage: (sessionId: string) =>
+    request<{ context_usage: ContextUsage }>(`/api/sessions/${sessionId}/context-usage`),
   chat: (sessionId: string, message: string, mode: ChatMode = 'chat') =>
     request<ChatResponse>('/api/chat', {
       method: 'POST',

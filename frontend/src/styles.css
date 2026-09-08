@@ -164,11 +164,26 @@ body {
 
 .composer {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 10px;
   padding: 14px 18px;
   border-top: 1px solid #dde3ea;
   background: #ffffff;
+}
+
+.context-usage-ring {
+  align-self: center;
+  cursor: help;
+}
+
+.context-usage-ring .ant-progress-text {
+  font-size: 11px !important;
+  font-variant-numeric: tabular-nums;
+}
+
+.context-usage-tooltip {
+  line-height: 1.65;
+  white-space: nowrap;
 }
 
 .composer-mode {

@@ -3,7 +3,7 @@ from typing import Any, Callable, Optional
 
 from langchain_core.tools import BaseTool, tool
 
-from sandbox_runtime.base import SandboxError
+from sandbox_runtime.base import SandboxError, SandboxValidationError
 from sandbox_runtime.manager import WorkspaceSandboxManager, get_sandbox_manager
 from sandbox_runtime.persistence import get_workspace_persistence
 
@@ -22,6 +22,7 @@ def _json_result(callback: Callable[[], Any]) -> str:
 def create_workspace_tools(
     session_id: str,
     manager: Optional[WorkspaceSandboxManager] = None,
+    artifact_requirements: Optional[dict[str, Any]] = None,
 ) -> list[BaseTool]:
     runtime = manager or get_sandbox_manager()
     persistence = get_workspace_persistence(runtime)
@@ -82,8 +83,41 @@ def create_workspace_tools(
 
     @tool("workspace_write_file")
     def workspace_write_file(path: str, content: str) -> str:
-        """Write a UTF-8 text file below /workspace in the isolated session sandbox."""
-        return _json_result(lambda: runtime.write_file(session_id, path, content))
+        """Write a non-empty UTF-8 deliverable and register output files as durable artifacts."""
+        def write_and_register() -> dict:
+            if not content:
+                raise SandboxError("Refusing to create an empty deliverable.")
+            requirements = artifact_requirements or {}
+            if requirements.get("require_verified_web"):
+                urls = [str(item) for item in requirements.get("verified_web_urls", []) if str(item)]
+                if not urls:
+                    raise SandboxValidationError(
+                        "Artifact blocked: verified web evidence is required but no page was opened successfully."
+                    )
+                if not any(url in content for url in urls):
+                    raise SandboxValidationError(
+                        "Artifact blocked: include at least one verified source URL in the deliverable."
+                    )
+            if requirements.get("require_document_citation"):
+                sources = [str(item) for item in requirements.get("document_sources", []) if str(item)]
+                if sources and not any(source in content for source in sources):
+                    raise SandboxValidationError(
+                        "Artifact blocked: identify the uploaded document source in the deliverable."
+                    )
+            write_result = runtime.write_file(session_id, path, content)
+            normalized_path = runtime.workspace_path(path)
+            result = {"write": write_result, "path": normalized_path, "registered": False}
+            if normalized_path.startswith("/workspace/output/"):
+                artifact = persistence.save_workspace_file(session_id, normalized_path)
+                if int(artifact.get("size_bytes", 0)) <= 0 or not artifact.get("artifact_id"):
+                    raise SandboxError("Artifact registration returned an invalid or empty record.")
+                result.update({
+                    "registered": True, "artifact_id": artifact["artifact_id"],
+                    "name": artifact["name"], "size_bytes": artifact["size_bytes"],
+                })
+            return result
+
+        return _json_result(write_and_register)
 
     @tool("workspace_process")
     def workspace_process(process_id: str, action: str = "status") -> str:
